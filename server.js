@@ -1,10 +1,11 @@
 const express = require('express');
 const cors = require('cors');
 const app = express();
-app.use(cors());
-app.use(express.json({ limit: '20mb' })); // increased for images
 
-// Your original endpoint — unchanged
+app.use(cors());
+app.use(express.json({ limit: '50mb' }));
+
+// ── Original RIASEC endpoint ──────────────────────────────────────────────────
 app.post('/generate', async (req, res) => {
   try {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -23,9 +24,13 @@ app.post('/generate', async (req, res) => {
   }
 });
 
-// New endpoint for hymn extraction
+// ── Hymnal extraction endpoint ────────────────────────────────────────────────
 app.post('/extract-hymn', async (req, res) => {
   const { imageBase64, mediaType } = req.body;
+
+  if (!imageBase64) {
+    return res.status(400).json({ success: false, error: 'No image provided' });
+  }
 
   try {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -43,17 +48,21 @@ app.post('/extract-hymn', async (req, res) => {
           content: [
             {
               type: 'image',
-              source: { type: 'base64', media_type: mediaType, data: imageBase64 }
+              source: {
+                type: 'base64',
+                media_type: mediaType || 'image/jpeg',
+                data: imageBase64
+              }
             },
             {
               type: 'text',
               text: `You are a hymnal data extraction engine.
 Extract ALL hymns visible on this scanned hymnal page.
-Return ONLY valid JSON (no markdown, no explanation).
+Return ONLY valid JSON — no markdown, no explanation, no code fences.
 
-Return a JSON array. Each item must match this shape:
+Return a JSON array. Each hymn must match this exact shape:
 {
-  "id": "celebration:<number>",
+  "id": "celebration:45",
   "hymnalId": "celebration",
   "number": 45,
   "title": "Blessed Assurance",
@@ -79,16 +88,18 @@ Return a JSON array. Each item must match this shape:
   "media": { "audio": null, "sheet": null }
 }
 
-RULES:
+STRICT RULES:
 1. Extract ONLY hymns visible on this page
-2. If two hymns appear, return BOTH as separate objects
-3. NEVER merge multiple hymns into one
-4. Ignore musical notation, staff lines, page numbers, section headers
-5. Preserve exact wording including hyphenation like heav'n-ly and o'er
-6. Detect verse numbers and group lines correctly
-7. If chorus is clearly labeled use type chorus — otherwise set chorus to null
-8. Never hallucinate missing words
-9. Return only JSON`
+2. If two hymns appear (end of one + start of another), return BOTH as separate objects
+3. NEVER merge multiple hymns into one object
+4. Ignore musical notation, staff lines, page numbers, and section headers
+5. Preserve exact wording — keep hyphenation like heav'n-ly, o'er, tho', 'tis
+6. Detect verse numbers (1, 2, 3...) and group lines under the correct verse
+7. If a chorus or refrain is clearly labeled, use type "chorus" — otherwise set chorus to null
+8. Never guess or hallucinate missing words — skip unreadable lines only
+9. id = "celebration:" + number
+10. firstLine = first lyrical line of verse 1, not the title
+11. Return ONLY the JSON array, nothing else`
             }
           ]
         }]
@@ -96,8 +107,22 @@ RULES:
     });
 
     const data = await response.json();
-    const text = data.content[0].text.trim();
-    const hymns = JSON.parse(text);
+
+    // surface API-level errors clearly
+    if (data.error) {
+      return res.status(500).json({ success: false, error: data.error.message });
+    }
+
+    const raw = data.content[0].text.trim();
+
+    // strip markdown fences if Claude added them anyway
+    const cleaned = raw
+      .replace(/^```json\s*/i, '')
+      .replace(/^```\s*/i, '')
+      .replace(/```$/i, '')
+      .trim();
+
+    const hymns = JSON.parse(cleaned);
     res.json({ success: true, hymns });
 
   } catch (err) {
